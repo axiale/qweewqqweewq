@@ -1,10 +1,10 @@
 import os
 from datetime import datetime, timedelta
-from fastapi import FastAPI, Request, Form, Depends, HTTPException, status
+from fastapi import FastAPI, Request, Form, Depends, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, ForeignKey
+from sqlalchemy import create_engine, Column, Integer, String, Float
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from passlib.context import CryptContext
@@ -35,9 +35,10 @@ class WebUser(Base):
     username = Column(String, unique=True, index=True)
     email = Column(String, unique=True, index=True)
     hashed_password = Column(String)
-    user_id = Column(Integer, ForeignKey("users.id"))  # связь с существующей таблицей users
+    user_id = Column(Integer)  # связь с таблицей users (без внешнего ключа)
 
-Base.metadata.create_all(bind=engine)
+# Создаём таблицу только если её нет
+Base.metadata.create_all(bind=engine, tables=[WebUser.__table__])
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -46,13 +47,13 @@ db = TrainingDB("training.db")
 calc = MuscleCalculator(db)
 
 # Вспомогательные функции аутентификации
-def get_current_user(request: Request, db: Session = None):
+def get_current_user(request: Request, db_session: Session = None):
     user_id = request.session.get("user_id")
     if not user_id:
         return None
-    if db is None:
-        db = SessionLocal()
-    user = db.query(WebUser).filter(WebUser.id == user_id).first()
+    if db_session is None:
+        db_session = SessionLocal()
+    user = db_session.query(WebUser).filter(WebUser.id == user_id).first()
     return user
 
 # Маршруты
@@ -88,7 +89,6 @@ async def register(request: Request, username: str = Form(...), email: str = For
     if db_session.query(WebUser).filter(WebUser.username == username).first():
         raise HTTPException(status_code=400, detail="Имя пользователя занято")
     # Создаём запись в основной таблице users (TrainingDB)
-    # Используем существующий метод add_user, который требует telegram_id=None
     user_id = db.add_user(name=name, height=height, weight=weight,
                           sleep_hours=sleep_hours, telegram_id=None)
     # Создаём веб-пользователя
@@ -118,7 +118,6 @@ async def add_workout(request: Request, user: WebUser = Depends(get_current_user
                       reps: int = Form(...), weight: float = Form(...)):
     if not user:
         return RedirectResponse(url="/login")
-    # Создаём новую тренировку (на текущую дату)
     workout_id = db.add_workout(user.user_id, datetime.now())
     db.add_workout_exercise(workout_id, exercise_id, sets, reps, weight)
     calc.clear_cache()
@@ -159,7 +158,8 @@ async def sleep_water(request: Request, user: WebUser = Depends(get_current_user
     if not user:
         return RedirectResponse(url="/login")
     water_today = db.get_water_intake(user.user_id)
-    sleep_today = db.get_sleep_history(user.user_id, days=1)[0]['hours'] if db.get_sleep_history(user.user_id, days=1) else None
+    sleep_history = db.get_sleep_history(user.user_id, days=1)
+    sleep_today = sleep_history[0]['hours'] if sleep_history else None
     return templates.TemplateResponse("sleep_water.html", {"request": request, "water_today": water_today, "sleep_today": sleep_today})
 
 @app.post("/add_water")
