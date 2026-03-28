@@ -1,5 +1,5 @@
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import logging
 
@@ -16,7 +16,6 @@ class TrainingDB:
         self._add_indexes()
 
     def _connect(self):
-        """Устанавливает соединение с БД и включает поддержку внешних ключей."""
         self.conn = sqlite3.connect(self.db_path)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
@@ -146,6 +145,27 @@ class TrainingDB:
                 target_percent REAL NOT NULL
             )
         """)
+
+        cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS sleep_history (
+                        user_id INTEGER,
+                        date DATE,
+                        hours REAL,
+                        PRIMARY KEY (user_id, date),
+                        FOREIGN KEY (user_id) REFERENCES users(id)
+                    )
+                """)
+        # Водный баланс
+        cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS water_intake (
+                        user_id INTEGER,
+                        date DATE,
+                        amount REAL,  -- в мл
+                        PRIMARY KEY (user_id, date),
+                        FOREIGN KEY (user_id) REFERENCES users(id)
+                    )
+                """)
+
         self.conn.commit()
 
     def _add_indexes(self):
@@ -155,6 +175,8 @@ class TrainingDB:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_workouts_datetime ON workouts(datetime)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_workout_exercises_workout ON workout_exercises(workout_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_exercise_muscle_muscle ON exercise_muscle(muscle_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_sleep_history_user_date ON sleep_history(user_id, date)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_water_intake_user_date ON water_intake(user_id, date)")
         self.conn.commit()
 
     # ---------- Работа с пользователями ----------
@@ -493,3 +515,49 @@ class TrainingDB:
             total = sum(default.values())
             factor = 100 / total
             return {k: round(v * factor, 1) for k, v in default.items()}
+
+    # Добавить запись сна
+    def add_sleep_record(self, user_id: int, hours: float, date: str = None):
+        if date is None:
+            date = datetime.now().strftime('%Y-%m-%d')
+        cursor = self.conn.cursor()
+        cursor.execute("INSERT OR REPLACE INTO sleep_history (user_id, date, hours) VALUES (?, ?, ?)",
+                       (user_id, date, hours))
+        self.conn.commit()
+
+    def get_sleep_history(self, user_id: int, days: int = 30) -> List[Dict]:
+        cursor = self.conn.cursor()
+        start = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
+        cursor.execute("""
+            SELECT date, hours FROM sleep_history
+            WHERE user_id = ? AND date >= ?
+            ORDER BY date
+        """, (user_id, start))
+        return [dict(row) for row in cursor.fetchall()]
+
+    # Добавить запись воды
+    def add_water_intake(self, user_id: int, amount: float, date: str = None):
+        if date is None:
+            date = datetime.now().strftime('%Y-%m-%d')
+        cursor = self.conn.cursor()
+        cursor.execute("INSERT OR REPLACE INTO water_intake (user_id, date, amount) VALUES (?, ?, ?)",
+                       (user_id, date, amount))
+        self.conn.commit()
+
+    def get_water_intake(self, user_id: int, date: str = None) -> float:
+        if date is None:
+            date = datetime.now().strftime('%Y-%m-%d')
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT amount FROM water_intake WHERE user_id = ? AND date = ?", (user_id, date))
+        row = cursor.fetchone()
+        return row['amount'] if row else 0.0
+
+    def get_water_history(self, user_id: int, days: int = 30) -> List[Dict]:
+        cursor = self.conn.cursor()
+        start = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
+        cursor.execute("""
+            SELECT date, amount FROM water_intake
+            WHERE user_id = ? AND date >= ?
+            ORDER BY date
+        """, (user_id, start))
+        return [dict(row) for row in cursor.fetchall()]

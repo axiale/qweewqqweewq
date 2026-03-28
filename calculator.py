@@ -155,6 +155,46 @@ class MuscleCalculator:
                 best_interval = interval
         return best_interval
 
+    def get_multiple_muscles_progress_plot(self, user_id: int, muscle_ids: List[int], days: int = 90) -> Optional[bytes]:
+        # Возвращает PNG с линиями для каждой мышцы
+        end = datetime.now()
+        start = end - timedelta(days=days)
+        workouts = self.db.get_workouts(user_id, limit=1000)
+        # Собираем данные по дням: ключ - дата (строка), значение - словарь muscle_id: нагрузка
+        data_by_date = {}
+        for w in workouts:
+            w_dt = datetime.fromisoformat(w['datetime'])
+            if start <= w_dt <= end:
+                load_dict = self.db.calculate_muscle_load_for_workout(w['id'])
+                # Суммируем нагрузку только по запрошенным мышцам
+                date_str = w_dt.date().isoformat()
+                if date_str not in data_by_date:
+                    data_by_date[date_str] = {mid: 0.0 for mid in muscle_ids}
+                for mid in muscle_ids:
+                    data_by_date[date_str][mid] += load_dict.get(mid, 0.0)
+        if not data_by_date:
+            return None
+        # Подготовка данных для графика
+        sorted_dates = sorted(data_by_date.keys())
+        plt.figure(figsize=(12, 6))
+        for mid in muscle_ids:
+            muscle = self.db.get_muscle(mid)
+            name = muscle['name'] if muscle else str(mid)
+            loads = [data_by_date[date][mid] for date in sorted_dates]
+            plt.plot(sorted_dates, loads, marker='o', label=name)
+        plt.title(f'Прогресс по мышцам за последние {days} дней')
+        plt.xlabel('Дата')
+        plt.ylabel('Нагрузка (кг)')
+        plt.legend()
+        plt.grid(True)
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png')
+        buf.seek(0)
+        plt.close()
+        return buf.getvalue()
+
     def analyze_muscle_balance(self, user_id: int, days: int = 60) -> Dict:
         """
         Анализирует баланс нагрузки по мышцам за последние days дней.
@@ -213,5 +253,96 @@ class MuscleCalculator:
                     "status": "extra",
                     "exercises": []
                 }
-
         return result
+
+    def get_muscle_and_sleep_plot(self, user_id: int, muscle_ids: List[int], days: int = 90) -> Optional[bytes]:
+        # Получаем нагрузку (аналогично предыдущему методу)
+        end = datetime.now()
+        start = end - timedelta(days=days)
+        workouts = self.db.get_workouts(user_id, limit=1000)
+        load_data = {}
+        for w in workouts:
+            w_dt = datetime.fromisoformat(w['datetime'])
+            if start <= w_dt <= end:
+                load_dict = self.db.calculate_muscle_load_for_workout(w['id'])
+                date_str = w_dt.date().isoformat()
+                if date_str not in load_data:
+                    load_data[date_str] = {mid: 0.0 for mid in muscle_ids}
+                for mid in muscle_ids:
+                    load_data[date_str][mid] += load_dict.get(mid, 0.0)
+        # Получаем сон
+        sleep_records = self.db.get_sleep_history(user_id, days)
+        sleep_by_date = {r['date']: r['hours'] for r in sleep_records}
+        # Объединяем даты
+        all_dates = sorted(set(load_data.keys()) | set(sleep_by_date.keys()))
+        if not all_dates:
+            return None
+        # Подготовка данных
+        loads_by_muscle = {mid: [] for mid in muscle_ids}
+        sleep_vals = []
+        for date in all_dates:
+            for mid in muscle_ids:
+                loads_by_muscle[mid].append(load_data.get(date, {}).get(mid, 0.0))
+            sleep_vals.append(sleep_by_date.get(date, None))
+        # Построение
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
+        # График нагрузки
+        for mid in muscle_ids:
+            muscle = self.db.get_muscle(mid)
+            name = muscle['name'] if muscle else str(mid)
+            ax1.plot(all_dates, loads_by_muscle[mid], marker='o', label=name)
+        ax1.set_ylabel('Нагрузка (кг)')
+        ax1.legend()
+        ax1.grid(True)
+        # График сна
+        ax2.plot(all_dates, sleep_vals, marker='s', color='green', label='Сон (часы)')
+        ax2.set_ylabel('Сон (часы)')
+        ax2.set_xlabel('Дата')
+        ax2.grid(True)
+        plt.xticks(rotation=45)
+        plt.suptitle(f'Прогресс мышц и сон за последние {days} дней')
+        plt.tight_layout()
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png')
+        buf.seek(0)
+        plt.close()
+        return buf.getvalue()
+
+    def recommend_weight_increase(self, user_id: int, exercise_id: int) -> Dict:
+        """
+        Анализирует историю выполнения упражнения и рекомендует, стоит ли увеличить вес.
+        Возвращает словарь с рекомендованным новым весом и обоснование.
+        """
+        workouts = self.db.get_workouts(user_id, limit=500)
+        # Собираем данные по упражнению
+        history = []
+        for w in workouts:
+            for we in self.db.get_workout_exercises(w['id']):
+                if we['exercise_id'] == exercise_id:
+                    history.append({
+                        'date': w['datetime'],
+                        'weight': we['weight'],
+                        'sets': we['sets'],
+                        'reps': we['reps']
+                    })
+        if len(history) < 3:
+            return {'can_increase': False, 'reason': 'Недостаточно данных'}
+        # Сортируем по дате
+        history.sort(key=lambda x: x['date'])
+        # Проверяем последние 3 тренировки
+        recent = history[-3:]
+        # Проверяем, что все повторения и подходы выполнены (можно добавить логику)
+        # Упрощённо: если в последних двух тренировках вес был одинаков и количество повторений >= целевого, то увеличиваем
+        # Здесь можно реализовать более сложную логику с учётом интервалов восстановления
+        # Пока сделаем просто: если последняя тренировка имела тот же вес, что и предыдущая, и прошло достаточно дней, то увеличить на 5%
+        last = recent[-1]
+        prev = recent[-2]
+        # Проверим интервал между тренировками (дни)
+        last_date = datetime.fromisoformat(last['date'])
+        prev_date = datetime.fromisoformat(prev['date'])
+        interval = (last_date - prev_date).days
+        if interval >= 3 and last['weight'] == prev['weight'] and last['reps'] >= 8:  # допустим, 8 повторений достаточно
+            new_weight = round(last['weight'] * 1.05, 1)
+            return {'can_increase': True, 'new_weight': new_weight, 'reason': f'Интервал {interval} дня, повторения выполнены.'}
+        else:
+            return {'can_increase': False, 'reason': 'Недостаточный интервал или нестабильное выполнение'}

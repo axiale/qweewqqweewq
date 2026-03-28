@@ -7,27 +7,34 @@ from telegram.ext import (
 from telegram.request import HTTPXRequest
 from database import TrainingDB
 from calculator import MuscleCalculator
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from telegram.error import TimedOut
 import io
+import re
 
 # Состояния для ConversationHandler
 NAME, HEIGHT, WEIGHT, SLEEP = range(4)
-EXERCISE_SELECT, SETS, REPS, LOAD, ADD_MORE = range(10, 15)  # Убрали CATEGORY_SELECT
+EXERCISE_SELECT, SETS, REPS, LOAD, ADD_MORE = range(10, 15)
 UPDATE_WEIGHT_STATE = 20
 TEMPLATE_NAME, TEMPLATE_EXERCISE, TEMPLATE_SETS, TEMPLATE_REPS, TEMPLATE_LOAD, TEMPLATE_ADD_MORE = range(30, 36)
 PROFILE_EDIT_NAME, PROFILE_EDIT_HEIGHT, PROFILE_EDIT_WEIGHT, PROFILE_EDIT_SLEEP = range(40, 44)
 REMINDER_SET = 50
+WATER_AMOUNT = 60
+SLEEP_HOURS = 61
+QUICK_INPUT = 70
 
 logger = logging.getLogger(__name__)
 
 class TrainingBot:
-    def __init__(self, token: str, db: TrainingDB, calc: MuscleCalculator):
+    def __init__(self, token: str, db: TrainingDB, calc: MuscleCalculator, proxy_url: str = None):
         self.token = token
         self.db = db
         self.calc = calc
-        # Увеличиваем таймауты для предотвращения ошибок сети
-        request = HTTPXRequest(connect_timeout=30, read_timeout=30)
+        # Если передан прокси, создаём request с ним, иначе без прокси
+        if proxy_url:
+            request = HTTPXRequest(connect_timeout=30, read_timeout=30, proxy=proxy_url)
+        else:
+            request = HTTPXRequest(connect_timeout=30, read_timeout=30)
         self.application = Application.builder().token(token).request(request).build()
         self._register_handlers()
         self.logger = logger
@@ -54,14 +61,12 @@ class TrainingBot:
         )
         self.application.add_handler(reg_conv)
 
-        # Добавление тренировки (без категорий, с нумерацией)
+        # Добавление тренировки (с быстрым вводом)
         workout_conv = ConversationHandler(
             entry_points=[MessageHandler(filters.Regex('^➕ Добавить тренировку$'), self.workout_start)],
             states={
                 EXERCISE_SELECT: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.workout_exercise)],
-                SETS: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.workout_sets)],
-                REPS: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.workout_reps)],
-                LOAD: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.workout_load)],
+                QUICK_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.quick_input)],
                 ADD_MORE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.workout_add_more)],
             },
             fallbacks=[CommandHandler("cancel", self.cancel)]
@@ -116,14 +121,30 @@ class TrainingBot:
         )
         self.application.add_handler(reminder_conv)
 
-        # Обработчики кнопок меню (сгруппированы по разделам)
+        # Вода
+        water_conv = ConversationHandler(
+            entry_points=[MessageHandler(filters.Regex('^💧 Вода$'), self.water_start)],
+            states={WATER_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.water_set)]},
+            fallbacks=[CommandHandler("cancel", self.cancel)]
+        )
+        self.application.add_handler(water_conv)
+
+        # Сон
+        sleep_conv = ConversationHandler(
+            entry_points=[MessageHandler(filters.Regex('^😴 Сон$'), self.sleep_start)],
+            states={SLEEP_HOURS: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.sleep_set)]},
+            fallbacks=[CommandHandler("cancel", self.cancel)]
+        )
+        self.application.add_handler(sleep_conv)
+
+        # Обработчики кнопок меню
         self.application.add_handler(MessageHandler(filters.Regex('^🏋️‍♂️ Тренировки$'), self.training_menu))
         self.application.add_handler(MessageHandler(filters.Regex('^📊 Аналитика$'), self.analytics_menu))
         self.application.add_handler(MessageHandler(filters.Regex('^👤 Профиль$'), self.profile_menu))
         self.application.add_handler(MessageHandler(filters.Regex('^🔔 Напоминания$'), self.reminders_menu))
         self.application.add_handler(MessageHandler(filters.Regex('^ℹ️ Помощь$'), self.help_command))
 
-        # Обработчики кнопок второго уровня (из подменю)
+        # Обработчики второго уровня
         self.application.add_handler(MessageHandler(filters.Regex('^➕ Добавить тренировку$'), self.workout_start))
         self.application.add_handler(MessageHandler(filters.Regex('^📜 История тренировок$'), self.show_history))
         self.application.add_handler(MessageHandler(filters.Regex('^❌ Удалить последнюю$'), self.delete_last_workout))
@@ -131,6 +152,8 @@ class TrainingBot:
         self.application.add_handler(MessageHandler(filters.Regex('^📊 Моя статистика$'), self.show_stats))
         self.application.add_handler(MessageHandler(filters.Regex('^📈 Частота тренировок$'), self.show_frequency))
         self.application.add_handler(MessageHandler(filters.Regex('^📈 График прогресса$'), self.progress_start))
+        self.application.add_handler(MessageHandler(filters.Regex('^📈 График нескольких мышц$'), self.multi_muscle_plot_start))
+        self.application.add_handler(MessageHandler(filters.Regex('^📈 График мышц и сна$'), self.muscle_sleep_plot_start))
         self.application.add_handler(MessageHandler(filters.Regex('^📊 Сравнение групп$'), self.group_stats))
         self.application.add_handler(MessageHandler(filters.Regex('^📈 Рекомендации$'), self.frequency_recommendations))
         self.application.add_handler(MessageHandler(filters.Regex('^⚖️ Анализ баланса$'), self.balance_analysis))
@@ -141,6 +164,8 @@ class TrainingBot:
 
         # Callback для графиков и шаблонов
         self.application.add_handler(CallbackQueryHandler(self.progress_callback, pattern="^progress_"))
+        self.application.add_handler(CallbackQueryHandler(self.multimuscle_callback, pattern="^multimuscle_"))
+        self.application.add_handler(CallbackQueryHandler(self.sleep_plot_callback, pattern="^sleep_plot_"))
         self.application.add_handler(CallbackQueryHandler(self.template_callback, pattern="^(template|apply)_"))
 
     # ----- Старт и главное меню -----
@@ -159,7 +184,6 @@ class TrainingBot:
             await update.message.reply_text("Выбери действие:", reply_markup=reply_markup)
 
     async def menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Главное меню с разделами."""
         user = update.effective_user
         db_user = self.db.get_user_by_telegram_id(user.id)
         if not db_user:
@@ -192,6 +216,8 @@ class TrainingBot:
             [KeyboardButton("📊 Моя статистика")],
             [KeyboardButton("📈 Частота тренировок")],
             [KeyboardButton("📈 График прогресса")],
+            [KeyboardButton("📈 График нескольких мышц")],
+            [KeyboardButton("📈 График мышц и сна")],
             [KeyboardButton("📊 Сравнение групп")],
             [KeyboardButton("📈 Рекомендации")],
             [KeyboardButton("⚖️ Анализ баланса")],
@@ -211,8 +237,13 @@ class TrainingBot:
         text += f"Рост: {db_user['height']} см\n"
         text += f"Вес: {db_user['weight']} кг\n"
         text += f"Сон: {db_user['sleep_hours']} ч\n"
+        # История воды за сегодня
+        water = self.db.get_water_intake(db_user['id'])
+        text += f"💧 Вода сегодня: {water} мл\n"
         keyboard = [
             [KeyboardButton("⚖️ Обновить вес")],
+            [KeyboardButton("💧 Вода")],
+            [KeyboardButton("😴 Сон")],
             [KeyboardButton("✏️ Редактировать профиль")],
             [KeyboardButton("🔙 Назад")],
         ]
@@ -232,19 +263,23 @@ class TrainingBot:
         help_text = (
             "ℹ️ **Помощь по боту**\n\n"
             "**🏋️‍♂️ Тренировки**\n"
-            "• **➕ Добавить тренировку** – начать запись тренировки. Введи номер упражнения из списка.\n"
+            "• **➕ Добавить тренировку** – начать запись тренировки. Введи номер упражнения из списка, затем данные в формате: 3x10 20 (подходы x повторения вес) или 3x10x20.\n"
             "• **📜 История тренировок** – последние 5 тренировок.\n"
             "• **❌ Удалить последнюю** – удалить последнюю тренировку.\n"
-            "• **📋 Шаблоны** – создание и применение шаблонов.\n\n"
+            "• **📋 Шаблоны** – создание и применение шаблонов (при применении может предложить увеличить вес).\n\n"
             "**📊 Аналитика**\n"
             "• **📊 Моя статистика** – развитие каждой мышцы за 30 дней.\n"
             "• **📈 Частота тренировок** – анализ интервалов между тренировками.\n"
             "• **📈 График прогресса** – график нагрузки на выбранную мышцу.\n"
+            "• **📈 График нескольких мышц** – сравнение прогресса нескольких мышц.\n"
+            "• **📈 График мышц и сна** – совмещённый график нагрузки и сна.\n"
             "• **📊 Сравнение групп** – нагрузка по группам мышц.\n"
             "• **📈 Рекомендации** – оптимальная частота тренировок.\n"
             "• **⚖️ Анализ баланса** – сравнение с целевыми пропорциями.\n\n"
             "**👤 Профиль**\n"
             "• **⚖️ Обновить вес** – изменить текущий вес.\n"
+            "• **💧 Вода** – записать выпитую воду (мл) за сегодня.\n"
+            "• **😴 Сон** – записать часы сна за сегодня.\n"
             "• **✏️ Редактировать профиль** – изменить имя, рост, вес, сон.\n\n"
             "**🔔 Напоминания**\n"
             "• **➕ Установить напоминание** – ежедневное напоминание в указанное время.\n"
@@ -312,20 +347,20 @@ class TrainingBot:
             return SLEEP
 
     async def cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        # Очищаем все данные пользователя, связанные с текущим диалогом
         keys_to_clear = [
             'workout_id', 'workout_exercise_id', 'workout_load_type',
             'workout_sets', 'workout_reps', 'workout_weight', 'template_name',
             'template_exercises', 'template_current_exercise', 'template_current_load_type',
             'template_current_sets', 'template_current_reps', 'template_current_weight',
-            'edit_user_id', 'edit_name', 'edit_height', 'edit_weight', 'exercise_list'
+            'edit_user_id', 'edit_name', 'edit_height', 'edit_weight', 'exercise_list',
+            'selected_muscles', 'muscle_list'
         ]
         for key in keys_to_clear:
             context.user_data.pop(key, None)
         await update.message.reply_text("Действие отменено.")
         return ConversationHandler.END
 
-    # ----- Добавление тренировки (с нумерованным списком упражнений) -----
+    # ----- Добавление тренировки с быстрым вводом -----
     async def workout_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         db_user = self.db.get_user_by_telegram_id(user.id)
@@ -333,24 +368,19 @@ class TrainingBot:
             await update.message.reply_text("Сначала зарегистрируйся!")
             return ConversationHandler.END
         context.user_data['workout_user_id'] = db_user['id']
-        # Создаём новую тренировку
         workout_id = self.db.add_workout(db_user['id'], datetime.now())
         context.user_data['workout_id'] = workout_id
 
-        # Получаем все упражнения и нумеруем их
         exercises = self.db.get_all_exercises()
         if not exercises:
             await update.message.reply_text("В базе пока нет упражнений.")
             return ConversationHandler.END
-        context.user_data['exercise_list'] = exercises  # сохраняем список
+        context.user_data['exercise_list'] = exercises
 
-        # Формируем текстовый список с номерами
         msg_lines = ["📋 Список упражнений (введи номер):"]
         for i, ex in enumerate(exercises, start=1):
             msg_lines.append(f"{i}. {ex['name']}")
         msg = "\n".join(msg_lines)
-
-        # Отправляем список и просим ввести номер
         await update.message.reply_text(msg)
         await update.message.reply_text("Введи номер упражнения:")
         return EXERCISE_SELECT
@@ -365,7 +395,6 @@ class TrainingBot:
 
         exercises = context.user_data.get('exercise_list')
         if not exercises:
-            # Если список пропал (ошибка), начинаем заново
             return await self.workout_start(update, context)
 
         if num < 1 or num > len(exercises):
@@ -376,52 +405,32 @@ class TrainingBot:
         context.user_data['workout_exercise_id'] = ex['id']
         context.user_data['workout_load_type'] = ex['load_type']
 
-        await update.message.reply_text("Сколько подходов?")
-        return SETS
+        await update.message.reply_text("Введи данные упражнения в формате:\n"
+                                        "3x10 20   или   3x10x20\n"
+                                        "где 3 - подходы, 10 - повторения, 20 - вес (для упражнений с весом).")
+        return QUICK_INPUT
 
-    async def workout_sets(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def quick_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        text = update.message.text.strip()
         try:
-            sets = int(update.message.text)
-            if sets <= 0:
+            match = re.match(r'(\d+)x(\d+)(?:\s+(\d+\.?\d*)|x(\d+\.?\d*))?', text)
+            if not match:
                 raise ValueError
-            context.user_data['workout_sets'] = sets
-            await update.message.reply_text("Сколько повторений в каждом подходе?")
-            return REPS
-        except ValueError:
-            await update.message.reply_text("Введи целое положительное число.")
-            return SETS
-
-    async def workout_reps(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        try:
-            reps = int(update.message.text)
-            if reps <= 0:
-                raise ValueError
-            context.user_data['workout_reps'] = reps
-            load_type = context.user_data['workout_load_type']
-            if load_type == 'weight':
-                await update.message.reply_text("Какой вес отягощения (в кг)?")
-                return LOAD
-            else:
-                context.user_data['workout_weight'] = 0.0
-                await self.save_workout_exercise(update, context)
-                await self._show_add_more_options(update, context)
-                return ADD_MORE
-        except ValueError:
-            await update.message.reply_text("Введи целое положительное число.")
-            return REPS
-
-    async def workout_load(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        try:
-            weight = float(update.message.text)
+            sets = int(match.group(1))
+            reps = int(match.group(2))
+            weight_str = match.group(3) or match.group(4)
+            weight = float(weight_str) if weight_str else 0.0
             if weight < 0:
                 raise ValueError
+            context.user_data['workout_sets'] = sets
+            context.user_data['workout_reps'] = reps
             context.user_data['workout_weight'] = weight
             await self.save_workout_exercise(update, context)
             await self._show_add_more_options(update, context)
             return ADD_MORE
-        except ValueError:
-            await update.message.reply_text("Введи неотрицательное число.")
-            return LOAD
+        except (ValueError, AttributeError):
+            await update.message.reply_text("Неверный формат. Пример: 3x10 20 или 3x10x20")
+            return QUICK_INPUT
 
     async def _show_add_more_options(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [
@@ -451,7 +460,6 @@ class TrainingBot:
     async def workout_add_more(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = update.message.text
         if text == "➕ Добавить ещё":
-            # Возвращаемся к выбору упражнения (список уже есть в context)
             exercises = context.user_data.get('exercise_list')
             if exercises:
                 msg_lines = ["📋 Список упражнений (введи номер):"]
@@ -462,11 +470,9 @@ class TrainingBot:
                 await update.message.reply_text("Введи номер упражнения:")
                 return EXERCISE_SELECT
             else:
-                # Если список пропал – начинаем заново
                 return await self.workout_start(update, context)
         elif text == "✅ Завершить тренировку":
             await self.show_workout_summary(update, context)
-            # Очищаем данные тренировки
             keys_to_clear = ['workout_id', 'workout_exercise_id', 'workout_load_type',
                              'workout_sets', 'workout_reps', 'workout_weight', 'exercise_list']
             for key in keys_to_clear:
@@ -490,7 +496,7 @@ class TrainingBot:
             text += "\n"
         await update.message.reply_text(text, parse_mode='Markdown')
 
-    # ----- Статистика и аналитика (без изменений) -----
+    # ----- Статистика и аналитика (существующие методы) -----
     async def show_stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         db_user = self.db.get_user_by_telegram_id(user.id)
@@ -564,6 +570,129 @@ class TrainingBot:
             await query.message.reply_photo(photo=plot_bytes, caption=f"Прогресс мышцы")
             await query.delete_message()
 
+    # ----- Новые графики -----
+    async def multi_muscle_plot_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user = update.effective_user
+        db_user = self.db.get_user_by_telegram_id(user.id)
+        if not db_user:
+            await update.message.reply_text("Сначала зарегистрируйся.")
+            return
+        muscles = self.db.get_all_muscles()
+        if not muscles:
+            await update.message.reply_text("Нет данных о мышцах.")
+            return
+        context.user_data['muscle_list'] = muscles
+        keyboard = []
+        for muscle in muscles:
+            keyboard.append([InlineKeyboardButton(muscle['name'], callback_data=f"multimuscle_{muscle['id']}")])
+        keyboard.append([InlineKeyboardButton("✅ Готово", callback_data="multimuscle_done")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text("Выберите мышцы для графика (можно несколько, после выбора нажмите 'Готово'):",
+                                        reply_markup=reply_markup)
+
+    async def multimuscle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+        data = query.data
+        if data == "multimuscle_done":
+            selected = context.user_data.get('selected_muscles', [])
+            if not selected:
+                await query.edit_message_text("Вы не выбрали ни одной мышцы.")
+                return
+            user = update.effective_user
+            db_user = self.db.get_user_by_telegram_id(user.id)
+            plot_bytes = self.calc.get_multiple_muscles_progress_plot(db_user['id'], selected)
+            if plot_bytes is None:
+                await query.edit_message_text("Недостаточно данных для построения графика.")
+            else:
+                await query.message.reply_photo(photo=plot_bytes, caption="График прогресса выбранных мышц")
+                await query.delete_message()
+            context.user_data.pop('selected_muscles', None)
+            context.user_data.pop('muscle_list', None)
+        elif data.startswith("multimuscle_"):
+            muscle_id = int(data.split("_")[1])
+            if 'selected_muscles' not in context.user_data:
+                context.user_data['selected_muscles'] = []
+            if muscle_id in context.user_data['selected_muscles']:
+                context.user_data['selected_muscles'].remove(muscle_id)
+            else:
+                context.user_data['selected_muscles'].append(muscle_id)
+            # Обновляем клавиатуру, показывая выбранные мышцы
+            await query.edit_message_reply_markup(reply_markup=self._update_multimuscle_keyboard(context))
+
+    async def muscle_sleep_plot_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user = update.effective_user
+        db_user = self.db.get_user_by_telegram_id(user.id)
+        if not db_user:
+            await update.message.reply_text("Сначала зарегистрируйся.")
+            return
+        muscles = self.db.get_all_muscles()
+        if not muscles:
+            await update.message.reply_text("Нет данных о мышцах.")
+            return
+        context.user_data['sleep_plot_muscle_list'] = muscles
+        keyboard = []
+        for muscle in muscles:
+            keyboard.append([InlineKeyboardButton(muscle['name'], callback_data=f"sleep_plot_{muscle['id']}")])
+        keyboard.append([InlineKeyboardButton("✅ Готово", callback_data="sleep_plot_done")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text("Выберите мышцы для графика со сном (можно несколько, затем 'Готово'):",
+                                        reply_markup=reply_markup)
+
+    async def sleep_plot_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+        data = query.data
+        if data == "sleep_plot_done":
+            selected = context.user_data.get('sleep_plot_selected', [])
+            if not selected:
+                await query.edit_message_text("Вы не выбрали ни одной мышцы.")
+                return
+            user = update.effective_user
+            db_user = self.db.get_user_by_telegram_id(user.id)
+            plot_bytes = self.calc.get_muscle_and_sleep_plot(db_user['id'], selected)
+            if plot_bytes is None:
+                await query.edit_message_text("Недостаточно данных для построения графика.")
+            else:
+                await query.message.reply_photo(photo=plot_bytes, caption="Прогресс мышц и сон")
+                await query.delete_message()
+            context.user_data.pop('sleep_plot_selected', None)
+            context.user_data.pop('sleep_plot_muscle_list', None)
+        elif data.startswith("sleep_plot_"):
+            muscle_id = int(data.split("_")[2])
+            if 'sleep_plot_selected' not in context.user_data:
+                context.user_data['sleep_plot_selected'] = []
+            if muscle_id in context.user_data['sleep_plot_selected']:
+                context.user_data['sleep_plot_selected'].remove(muscle_id)
+            else:
+                context.user_data['sleep_plot_selected'].append(muscle_id)
+            await query.edit_message_reply_markup(reply_markup=self._update_sleep_plot_keyboard(context))
+
+    def _update_multimuscle_keyboard(self, context: ContextTypes.DEFAULT_TYPE) -> InlineKeyboardMarkup:
+        muscles = context.user_data.get('muscle_list', [])
+        selected = context.user_data.get('selected_muscles', [])
+        keyboard = []
+        for muscle in muscles:
+            text = muscle['name']
+            if muscle['id'] in selected:
+                text = "✅ " + text
+            keyboard.append([InlineKeyboardButton(text, callback_data=f"multimuscle_{muscle['id']}")])
+        keyboard.append([InlineKeyboardButton("✅ Готово", callback_data="multimuscle_done")])
+        return InlineKeyboardMarkup(keyboard)
+
+    def _update_sleep_plot_keyboard(self, context: ContextTypes.DEFAULT_TYPE) -> InlineKeyboardMarkup:
+        muscles = context.user_data.get('sleep_plot_muscle_list', [])
+        selected = context.user_data.get('sleep_plot_selected', [])
+        keyboard = []
+        for muscle in muscles:
+            text = muscle['name']
+            if muscle['id'] in selected:
+                text = "✅ " + text
+            keyboard.append([InlineKeyboardButton(text, callback_data=f"sleep_plot_{muscle['id']}")])
+        keyboard.append([InlineKeyboardButton("✅ Готово", callback_data="sleep_plot_done")])
+        return InlineKeyboardMarkup(keyboard)
+
+    # ----- Остальные аналитические методы -----
     async def group_stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         db_user = self.db.get_user_by_telegram_id(user.id)
@@ -621,22 +750,16 @@ class TrainingBot:
         if not db_user:
             await update.message.reply_text("Сначала зарегистрируйся.")
             return
-
         await update.message.reply_text("🔍 Анализирую баланс мышц за последние 60 дней...")
-
         result = self.calc.analyze_muscle_balance(db_user['id'], days=60)
-
         if "error" in result:
             await update.message.reply_text(result["error"])
             return
-
         text = "📊 **Анализ мышечного баланса**\n\n"
         text += "Целевые проценты – ориентировочные для сбалансированного развития.\n\n"
-
         under = []
         over = []
         ok = []
-
         for name, data in result.items():
             status = data['status']
             line = f"• {name}: факт {data['actual_percent']}% / цель {data['target_percent']}%"
@@ -652,7 +775,6 @@ class TrainingBot:
             else:
                 line += f" (не учтена в целях, факт {data['actual_percent']}%)"
             text += line + "\n"
-
         if under:
             text += "\n**Рекомендации для отстающих мышц:**\n"
             for name, data in under:
@@ -662,7 +784,6 @@ class TrainingBot:
                         text += f"   - {ex['name']} (задействует {ex['percentage']}%)\n"
                 else:
                     text += "   (нет подходящих упражнений в базе)\n"
-
         await self._send_long_message(update, text, parse_mode='Markdown')
 
     # ----- История и удаление -----
@@ -708,7 +829,7 @@ class TrainingBot:
             logger.error(f"Ошибка удаления тренировки: {e}")
             await update.message.reply_text("Произошла ошибка при удалении.")
 
-    # ----- Напоминания (без изменений) -----
+    # ----- Напоминания -----
     async def set_reminder(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             time_str = context.args[0]
@@ -745,6 +866,50 @@ class TrainingBot:
     async def reminder_callback(self, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=context.job.chat_id, text="⏰ Время тренировки!")
 
+    # ----- Вода -----
+    async def water_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await update.message.reply_text("Сколько воды вы выпили сегодня (в мл)?")
+        return WATER_AMOUNT
+
+    async def water_set(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        try:
+            amount = float(update.message.text)
+            if amount <= 0:
+                raise ValueError
+            user = update.effective_user
+            db_user = self.db.get_user_by_telegram_id(user.id)
+            if not db_user:
+                await update.message.reply_text("Сначала зарегистрируйтесь.")
+                return ConversationHandler.END
+            self.db.add_water_intake(db_user['id'], amount)
+            await update.message.reply_text(f"Записано: {amount} мл воды.")
+            return ConversationHandler.END
+        except ValueError:
+            await update.message.reply_text("Введите положительное число (мл).")
+            return WATER_AMOUNT
+
+    # ----- Сон -----
+    async def sleep_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await update.message.reply_text("Сколько часов вы спали сегодня?")
+        return SLEEP_HOURS
+
+    async def sleep_set(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        try:
+            hours = float(update.message.text)
+            if hours <= 0:
+                raise ValueError
+            user = update.effective_user
+            db_user = self.db.get_user_by_telegram_id(user.id)
+            if not db_user:
+                await update.message.reply_text("Сначала зарегистрируйтесь.")
+                return ConversationHandler.END
+            self.db.add_sleep_record(db_user['id'], hours)
+            await update.message.reply_text(f"Записано: {hours} ч сна.")
+            return ConversationHandler.END
+        except ValueError:
+            await update.message.reply_text("Введите положительное число (часы).")
+            return SLEEP_HOURS
+
     # ----- Обновление веса -----
     async def update_weight_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Введи новый вес в кг:")
@@ -767,7 +932,7 @@ class TrainingBot:
             await update.message.reply_text("Пожалуйста, введи положительное число.")
             return UPDATE_WEIGHT_STATE
 
-    # ----- Шаблоны (без изменений) -----
+    # ----- Шаблоны (с рекомендацией веса) -----
     async def list_templates(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         db_user = self.db.get_user_by_telegram_id(user.id)
@@ -817,9 +982,22 @@ class TrainingBot:
                 await query.edit_message_text("Ошибка: пользователь не найден.")
                 return
             workout_id = self.db.add_workout(db_user['id'], datetime.now())
-            self.db.apply_template(template_id, workout_id)
+            template_exercises = self.db.get_template_exercises(template_id)
+            weight_updates = []
+            for ex in template_exercises:
+                rec = self.calc.recommend_weight_increase(db_user['id'], ex['exercise_id'])
+                weight = ex['weight'] if ex['weight'] is not None else 0.0
+                if rec.get('can_increase') and rec.get('new_weight', 0) > weight:
+                    weight_updates.append((ex['name'], weight, rec['new_weight']))
+                    weight = rec['new_weight']
+                self.db.add_workout_exercise(workout_id, ex['exercise_id'], ex['sets'], ex['reps'], weight)
             self.calc.clear_cache()
-            await query.edit_message_text("✅ Шаблон применён, тренировка создана!")
+            msg = "✅ Шаблон применён, тренировка создана!"
+            if weight_updates:
+                msg += "\n\nРекомендации по увеличению веса:\n"
+                for name, old, new in weight_updates:
+                    msg += f"• {name}: {old} → {new} кг\n"
+            await query.edit_message_text(msg)
         elif data == "template_cancel":
             await query.delete_message()
 
@@ -926,7 +1104,7 @@ class TrainingBot:
         await update.message.reply_text("Введи следующее упражнение или 'готово' для завершения:")
         return TEMPLATE_EXERCISE
 
-    # ----- Профиль (редактирование) -----
+    # ----- Редактирование профиля -----
     async def profile_edit_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         db_user = self.db.get_user_by_telegram_id(user.id)
@@ -987,10 +1165,6 @@ class TrainingBot:
         except ValueError:
             await update.message.reply_text("Пожалуйста, введи положительное число.")
             return PROFILE_EDIT_SLEEP
-
-    # ----- Управление тренировками (краткая статистика) -----
-    async def workout_management(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await self.training_menu(update, context)
 
     # ----- Вспомогательные методы -----
     async def _send_long_message(self, update: Update, text: str, parse_mode: str = None):

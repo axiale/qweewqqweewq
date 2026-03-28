@@ -5,6 +5,8 @@ from database import TrainingDB
 from calculator import MuscleCalculator
 from telegram_bot import TrainingBot
 
+
+print("PROXY_URL =", os.environ.get("PROXY_URL"))
 # Настройка логирования
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -116,6 +118,7 @@ def init_default_data(db: TrainingDB):
         lower_back = muscle_ids.get("Разгибатели спины")
         forearms = muscle_ids.get("Предплечья")
         core = muscle_ids.get("Кор")
+
 
     # --- Базовые упражнения (со свободными весами) ---
     # Для каждого упражнения будем использовать add_exercise_if_not_exists
@@ -319,6 +322,10 @@ def init_default_data(db: TrainingDB):
     add_exercise_if_not_exists(db, "Тяга штанги в наклоне", "weight",
                                category_id=group_ids.get("Спина"),
                                muscle_percentages={latissimus: 60, trapezius: 20, biceps: 20})
+    add_exercise_if_not_exists(db, "Наклоны с гантелями на широчайшие", "weight",
+                               description="Стоя, наклон с прямой спиной, тяга гантели к поясу одной рукой",
+                               category_id=group_ids.get("Спина"),
+                               muscle_percentages={latissimus: 70, trapezius: 15, biceps: 15})
 
     # Сохраняем целевые проценты (если ещё не сохранены)
     target_ratios = db.get_target_ratios()
@@ -364,7 +371,9 @@ def main():
         set_key(".env", "BOT_TOKEN", TOKEN)
         os.environ["BOT_TOKEN"] = TOKEN
 
-    bot = TrainingBot(TOKEN, db, calc)
+    PROXY_URL = os.environ.get("PROXY_URL")  # читаем прокси из .env
+
+    bot = TrainingBot(TOKEN, db, calc, proxy_url=PROXY_URL)  # передаём прокси
     print("Бот запущен...")
     try:
         bot.run()
