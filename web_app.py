@@ -9,7 +9,7 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from passlib.context import CryptContext
 from starlette.middleware.sessions import SessionMiddleware
-
+from jinja2 import Environment, FileSystemLoader
 from database import TrainingDB
 from calculator import MuscleCalculator
 
@@ -22,12 +22,18 @@ app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
 
 # Подключение статики и шаблонов
 app.mount("/static", StaticFiles(directory="static"), name="static")
-templates = Jinja2Templates(directory="templates")
+env = Environment(
+    loader=FileSystemLoader("templates"),
+    auto_reload=False
+)
+templates = Jinja2Templates(env=env)
 
 # SQLAlchemy для пользователей (добавляем таблицу веб-пользователей)
 Base = declarative_base()
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(bind=engine)
+
+
 
 class WebUser(Base):
     __tablename__ = "web_users"
