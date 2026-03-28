@@ -47,14 +47,17 @@ db = TrainingDB("training.db")
 calc = MuscleCalculator(db)
 
 # Вспомогательные функции аутентификации
-def get_current_user(request: Request, db_session: Session = None):
+# Вспомогательные функции аутентификации
+def get_current_user(request: Request):
     user_id = request.session.get("user_id")
     if not user_id:
         return None
-    if db_session is None:
-        db_session = SessionLocal()
-    user = db_session.query(WebUser).filter(WebUser.id == user_id).first()
-    return user
+    db_session = SessionLocal()
+    try:
+        user = db_session.query(WebUser).filter(WebUser.id == user_id).first()
+        return user
+    finally:
+        db_session.close()
 
 # Маршруты
 @app.get("/", response_class=HTMLResponse)
