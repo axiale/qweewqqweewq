@@ -24,7 +24,9 @@ app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 env = Environment(
     loader=FileSystemLoader("templates"),
-    auto_reload=False
+    auto_reload=False,
+    enable_async=True,
+    cache_size=0  # полностью отключаем кэш шаблонов
 )
 templates = Jinja2Templates(env=env)
 
