@@ -9,7 +9,7 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from passlib.context import CryptContext
 from starlette.middleware.sessions import SessionMiddleware
-from jinja2 import Environment, FileSystemLoader
+
 from database import TrainingDB
 from calculator import MuscleCalculator
 
@@ -22,20 +22,12 @@ app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
 
 # Подключение статики и шаблонов
 app.mount("/static", StaticFiles(directory="static"), name="static")
-env = Environment(
-    loader=FileSystemLoader("templates"),
-    auto_reload=False,
-    enable_async=True,
-    cache_size=0  # полностью отключаем кэш шаблонов
-)
-templates = Jinja2Templates(env=env)
+templates = Jinja2Templates(directory="templates")
 
 # SQLAlchemy для пользователей (добавляем таблицу веб-пользователей)
 Base = declarative_base()
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(bind=engine)
-
-
 
 class WebUser(Base):
     __tablename__ = "web_users"
@@ -55,7 +47,6 @@ db = TrainingDB("training.db")
 calc = MuscleCalculator(db)
 
 # Вспомогательные функции аутентификации
-# Вспомогательные функции аутентификации
 def get_current_user(request: Request):
     user_id = request.session.get("user_id")
     if not user_id:
@@ -71,11 +62,11 @@ def get_current_user(request: Request):
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     user = get_current_user(request)
-    return templates.TemplateResponse("index.html", {"request": request, "user": user})
+    return templates.TemplateResponse(request, "index.html", {"user": user})
 
 @app.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request):
-    return templates.TemplateResponse("login.html", {"request": request})
+    return templates.TemplateResponse(request, "login.html", {})
 
 @app.post("/login")
 async def login(request: Request, username: str = Form(...), password: str = Form(...)):
@@ -88,7 +79,7 @@ async def login(request: Request, username: str = Form(...), password: str = For
 
 @app.get("/register", response_class=HTMLResponse)
 async def register_page(request: Request):
-    return templates.TemplateResponse("register.html", {"request": request})
+    return templates.TemplateResponse(request, "register.html", {})
 
 @app.post("/register")
 async def register(request: Request, username: str = Form(...), email: str = Form(...),
@@ -121,7 +112,7 @@ async def add_workout_page(request: Request, user: WebUser = Depends(get_current
     if not user:
         return RedirectResponse(url="/login")
     exercises = db.get_all_exercises()
-    return templates.TemplateResponse("add_workout.html", {"request": request, "exercises": exercises})
+    return templates.TemplateResponse(request, "add_workout.html", {"exercises": exercises, "user": user})
 
 @app.post("/add_workout")
 async def add_workout(request: Request, user: WebUser = Depends(get_current_user),
@@ -150,7 +141,7 @@ async def stats(request: Request, user: WebUser = Depends(get_current_user)):
             "workout_count": dev['workout_count'],
             "delta_percent": dev['delta_percent']
         })
-    return templates.TemplateResponse("stats.html", {"request": request, "stats": stats_data})
+    return templates.TemplateResponse(request, "stats.html", {"stats": stats_data, "user": user})
 
 # Страница баланса
 @app.get("/balance", response_class=HTMLResponse)
@@ -160,8 +151,8 @@ async def balance(request: Request, user: WebUser = Depends(get_current_user)):
     result = calc.analyze_muscle_balance(user.user_id, days=60)
     if "error" in result:
         error = result["error"]
-        return templates.TemplateResponse("balance.html", {"request": request, "error": error})
-    return templates.TemplateResponse("balance.html", {"request": request, "result": result})
+        return templates.TemplateResponse(request, "balance.html", {"error": error, "user": user})
+    return templates.TemplateResponse(request, "balance.html", {"result": result, "user": user})
 
 # Страница сна/воды
 @app.get("/sleep_water", response_class=HTMLResponse)
@@ -171,7 +162,11 @@ async def sleep_water(request: Request, user: WebUser = Depends(get_current_user
     water_today = db.get_water_intake(user.user_id)
     sleep_history = db.get_sleep_history(user.user_id, days=1)
     sleep_today = sleep_history[0]['hours'] if sleep_history else None
-    return templates.TemplateResponse("sleep_water.html", {"request": request, "water_today": water_today, "sleep_today": sleep_today})
+    return templates.TemplateResponse(request, "sleep_water.html", {
+        "water_today": water_today,
+        "sleep_today": sleep_today,
+        "user": user
+    })
 
 @app.post("/add_water")
 async def add_water(request: Request, user: WebUser = Depends(get_current_user),

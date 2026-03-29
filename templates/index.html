@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h1>Muscle Tracker</h1>
+{% if user %}
+    <p>Привет, {{ user.username }}!</p>
+    <p><a href="/add_workout">➕ Добавить тренировку</a></p>
+    <p><a href="/stats">📊 Статистика</a></p>
+    <p><a href="/balance">⚖️ Баланс мышц</a></p>
+    <p><a href="/sleep_water">💧 Сон и вода</a></p>
+    <p><a href="/logout">🚪 Выйти</a></p>
+{% else %}
+    <p>Добро пожаловать! <a href="/login">Войдите</a> или <a href="/register">зарегистрируйтесь</a>.</p>
+{% endif %}
+{% endblock %}
